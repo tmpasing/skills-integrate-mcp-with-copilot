@@ -5,11 +5,14 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
 import os
+import uuid
 from pathlib import Path
+
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -77,10 +80,93 @@ activities = {
     }
 }
 
+# Simple in-memory authentication store for the initial role-based auth feature
+users = {
+    "student": {
+        "michael@mergington.edu": {
+            "name": "Michael",
+            "password": "student123",
+            "role": "student",
+        },
+        "emma@mergington.edu": {
+            "name": "Emma",
+            "password": "student123",
+            "role": "student",
+        },
+    },
+    "advisor": {
+        "coach@mergington.edu": {
+            "name": "Coach Johnson",
+            "password": "advisor123",
+            "role": "advisor",
+        },
+    },
+}
+
+sessions = {}
+
+
+class LoginRequest(BaseModel):
+    role: str
+    email: str
+    password: str
+
+
+def _generate_token() -> str:
+    return uuid.uuid4().hex
+
+
+def _get_session_from_bearer(authorization: str | None):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    token = authorization.split(" ", 1)[1].strip()
+    session = sessions.get(token)
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    return session
+
 
 @app.get("/")
 def root():
     return RedirectResponse(url="/static/index.html")
+
+
+@app.post("/auth/login")
+def login_user(payload: LoginRequest):
+    """Authenticate a student or advisor and return a session token."""
+    role = payload.role.lower()
+    email = payload.email.lower()
+
+    if role not in users:
+        raise HTTPException(status_code=401, detail="Invalid role")
+
+    account = users[role].get(email)
+    if not account or account["password"] != payload.password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = _generate_token()
+    session = {
+        "token": token,
+        "role": role,
+        "email": email,
+        "name": account["name"],
+    }
+    sessions[token] = session
+
+    return {
+        "message": f"Logged in as {role}",
+        "token": token,
+        "role": role,
+        "email": email,
+        "name": account["name"],
+    }
+
+
+@app.get("/auth/me")
+def get_current_user(authorization: str | None = Header(default=None, alias="Authorization")):
+    session = _get_session_from_bearer(authorization)
+    return session
 
 
 @app.get("/activities")
@@ -89,44 +175,40 @@ def get_activities():
 
 
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
-    """Sign up a student for an activity"""
-    # Validate activity exists
+def signup_for_activity(activity_name: str, email: str, request: Request, authorization: str | None = Header(default=None, alias="Authorization")):
+    """Sign up a student for an activity after authentication."""
+    _get_session_from_bearer(authorization)
+
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
 
-    # Get the specific activity
     activity = activities[activity_name]
 
-    # Validate student is not already signed up
     if email in activity["participants"]:
         raise HTTPException(
             status_code=400,
             detail="Student is already signed up"
         )
 
-    # Add student
     activity["participants"].append(email)
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
-    """Unregister a student from an activity"""
-    # Validate activity exists
+def unregister_from_activity(activity_name: str, email: str, authorization: str | None = Header(default=None, alias="Authorization")):
+    """Unregister a student from an activity after authentication."""
+    _get_session_from_bearer(authorization)
+
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
 
-    # Get the specific activity
     activity = activities[activity_name]
 
-    # Validate student is signed up
     if email not in activity["participants"]:
         raise HTTPException(
             status_code=400,
             detail="Student is not signed up for this activity"
         )
 
-    # Remove student
     activity["participants"].remove(email)
     return {"message": f"Unregistered {email} from {activity_name}"}
